@@ -1,0 +1,6 @@
+Port 2222
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+AllowUsers mpiuser

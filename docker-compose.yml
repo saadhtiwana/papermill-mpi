@@ -1,0 +1,17 @@
+# One per node, same image everywhere. Per-node values come from .env next to this file
+# (IMAGE, ROLE, IMAGE_DIGEST, MPIRUN_ARGS, MASTER_CMD); aws/04_deploy.sh writes it.
+services:
+  node:
+    image: ${IMAGE}
+    container_name: papermill-node
+    network_mode: host          # MPI and ssh use the node's own address
+    restart: unless-stopped     # comes back after an instance stop/start
+    shm_size: "1gb"             # OpenMPI shared-memory transport for ranks on the same node
+    environment:
+      ROLE: ${ROLE:-worker}
+      IMAGE_DIGEST: ${IMAGE_DIGEST:-}
+      MPIRUN_ARGS: ${MPIRUN_ARGS:-}
+      MASTER_CMD: ${MASTER_CMD:-}
+    volumes:
+      - /data:/data
+      - ./ssh:/home/mpiuser/.ssh
