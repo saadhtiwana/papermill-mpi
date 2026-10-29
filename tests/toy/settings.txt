@@ -1,0 +1,6 @@
+tf=log
+idf=smooth
+norm=l2
+min_token_len=3
+stemming=none
+stoplist=with,is,the,and,of

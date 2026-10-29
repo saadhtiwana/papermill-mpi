@@ -1,0 +1,10 @@
+# papermill-mpi settings: key=value, one per line (lines without '=' are ignored)
+# tf:   raw (c) | log (1 + ln c) | aug (0.5 + 0.5 c / maxc)
+# idf:  plain (ln N/df) | smooth (ln((1+N)/(1+df)) + 1) | bm25 (ln(1 + (N-df+0.5)/(df+0.5)))
+# norm: none | l2 (divide each document vector by its Euclidean length)
+tf=aug
+idf=smooth
+norm=l2
+min_token_len=3
+stemming=plural_s
+stoplist=a,an,and,are,as,at,be,been,but,by,can,for,from,has,have,how,if,in,into,is,it,its,more,not,of,on,or,our,such,than,that,the,their,these,this,to,was,we,were,what,when,which,while,with,within,without

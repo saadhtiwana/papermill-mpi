@@ -1,0 +1,6 @@
+tf=log
+idf=plain
+norm=l2
+min_token_len=2
+stemming=plural_s
+stoplist=the,of,and,in,with,is,a,we

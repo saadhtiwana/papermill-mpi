@@ -1,0 +1,4 @@
+{"id": "d1", "text": "Sparse solvers handle sparse systems."}
+{"id": "d2", "text": "Sparse matrix storage formats."}
+{"id": "d3", "text": "Parallel solvers scale nicely."}
+{"id": "d4", "text": "Dense kernels run fast."}

@@ -1,0 +1,6 @@
+tf=raw
+idf=bm25
+norm=none
+min_token_len=1
+stemming=none
+stoplist=the,of,and,a
