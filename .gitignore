@@ -1,0 +1,37 @@
+# secrets and per-deployment state
+keys/
+*.pem
+id_*
+aws/ids.env
+aws/ids.env.tmp
+aws/config.env
+.env
+
+# data, shards, indexes, outputs
+data/
+demo/
+shards/
+index/
+testdata/
+*.jsonl.gz
+*.bin
+logs/
+
+# third-party inputs and documents that must never be committed
+kit/
+server.py
+*.docx
+*.zip
+*.pdf
+SUBMISSION.txt
+PROGRESS.md
+resources.md
+CLAUDE.md
+
+# build outputs and OS noise
+build/
+/engine/engine
+*.o
+__pycache__/
+*.pyc
+.DS_Store
