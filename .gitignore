@@ -20,6 +20,7 @@ logs/
 # third-party inputs and documents that must never be committed
 kit/
 server.py
+!web/server.py
 *.docx
 *.zip
 *.pdf

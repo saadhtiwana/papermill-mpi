@@ -20,6 +20,8 @@ COPY docker/ssh_client.conf /etc/ssh/ssh_config.d/papermill.conf
 RUN ssh-keygen -A
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh
+# optional web console (standard-library Python); started on the master through MASTER_CMD
+COPY web/ /opt/web/
 
 ENV ROLE=worker
 ENTRYPOINT ["/entrypoint.sh"]
