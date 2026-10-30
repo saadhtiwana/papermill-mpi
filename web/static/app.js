@@ -8,21 +8,15 @@ const fmtInt = (n) => (n == null ? "—" : Number(n).toLocaleString("en-US"));
 const fmtSec = (s) => (s == null ? "—" : s < 10 ? s.toFixed(2) + " s" : s < 100 ? s.toFixed(1) + " s" : Math.round(s) + " s");
 const fmtMs = (ms) => (ms < 1000 ? ms.toFixed(ms < 100 ? 1 : 0) + " ms" : (ms / 1000).toFixed(2) + " s");
 const ARXIV = /^(\d{4}\.\d{4,5}(v\d+)?|[a-z\-]+(\.[A-Z]{2})?\/\d{7})$/;
-const ICON_EXT = '<svg class="ext" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5h5v5M9.5 2.5 3 9"/></svg>';
-const ICON_INFO = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 7.5v3.5M8 5h.01"/></svg>';
+const icon = (d, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
+const ICON_ARROW = icon("M7 17 17 7M9 7h8v8");
+const ICON_EXT = icon("M7 17 17 7M9 7h8v8", "i ext");
+// fine line circles behind the hero text
+const DECOR = `<svg class="hero-decor" viewBox="0 0 500 360" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+  <circle cx="150" cy="30" r="150"/><circle cx="350" cy="400" r="270"/><circle cx="318" cy="64" r="20"/>
+  <circle class="pt" cx="250" cy="34" r="3"/><circle class="pt" cx="38" cy="150" r="3"/></svg>`;
 
-const state = {
-  status: null,
-  clockSkew: 0, // server time - local time, seconds
-  mode: "omp",
-  threads: 2,
-  ranks: 3,
-  size: null,
-  benchSize: null,
-  runs: [],
-  stream: null,
-  tick: null,
-};
+const state = { status: null, clockSkew: 0, mode: "omp", threads: 2, ranks: 3, size: null, benchSize: null, runs: [], stream: null, tick: null, last: null };
 
 async function api(path, body) {
   const res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
@@ -39,6 +33,7 @@ function toast(msg) {
   toast.h = setTimeout(() => (t.hidden = true), 4000);
 }
 
+const MODE = { seq: "Sequential", omp: "Single node", mpi: "Cluster" };
 function layoutLabel(r) {
   if (!r) return "";
   if (r.mode === "seq") return "Sequential";
@@ -46,13 +41,26 @@ function layoutLabel(r) {
   return `Cluster · ${r.ranks} × ${r.threads}`;
 }
 const layoutShort = (r) => (r.mode === "seq" ? "1 × 1" : r.mode === "omp" ? `1 × ${r.threads}` : `${r.ranks} × ${r.threads}`);
+const onLayout = (r) =>
+  r.mode === "seq" ? "with one thread" : r.mode === "omp" ? `on one node with ${r.threads} threads` : `on the cluster, ${r.ranks} ranks × ${r.threads} threads`;
+const plural = (n, w) => `${fmtInt(n)} ${w}${n === 1 ? "" : "s"}`;
 
 function ago(t) {
   const s = Math.max(0, Date.now() / 1000 + state.clockSkew - t);
   if (s < 60) return "just now";
   if (s < 3600) return Math.floor(s / 60) + " min ago";
   if (s < 86400) return Math.floor(s / 3600) + " h ago";
-  return new Date(t * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return Math.floor(s / 86400) + " d ago";
+}
+const when = (t) => {
+  const d = new Date(t * 1000);
+  return `${d.getDate()} ${d.toLocaleString("en-US", { month: "short" })}, ${d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+};
+
+function hero(el, { tag, text, href, label }) {
+  el.innerHTML = `${DECOR}<div class="hero-top"><span class="hero-tag">${esc(tag)}</span>
+    ${href ? `<a class="hero-link" href="${href}" aria-label="${esc(label)}">${ICON_ARROW}</a>` : ""}</div>
+    <p class="hero-text">${text}</p>`;
 }
 
 /* ------------------------------------------------------------------ theme */
@@ -86,7 +94,6 @@ function route() {
   document.title = `${TITLES[v]} · papermill`;
   if (v === "benchmarks") loadRuns();
   if (v === "cluster" && !loadCluster.done) loadCluster();
-  if (v === "search" && !$("#results").innerHTML) renderSearchIdle();
 }
 window.addEventListener("hashchange", () => {
   route();
@@ -106,7 +113,10 @@ async function loadStatus() {
     }
     paintPill();
     renderIndexForm();
+    renderSearchHero();
+    renderIndexHero();
     if (s.job && s.job.status === "running") follow(s.job);
+    else if (!$("#results").innerHTML) renderSearchIdle();
   } catch (e) {
     paintPill(e);
   }
@@ -124,7 +134,7 @@ function paintPill(err) {
     txt.textContent = `Indexing · ${s.job.progress}%`;
   } else if (s.index) {
     dot.dataset.state = "ready";
-    txt.textContent = `Ready · ${layoutShort(s.index)} · ${fmtInt(s.index.docs)} docs`;
+    txt.innerHTML = `<b>Index ready</b><span>${esc(layoutLabel(s.index))} · ${fmtInt(s.index.docs)} docs</span>`;
     txt.title = `${layoutLabel(s.index)}, size ${s.index.size}`;
   } else {
     dot.dataset.state = "none";
@@ -136,54 +146,68 @@ function paintPill(err) {
 const RECENT_KEY = "pm-recent";
 const recent = () => JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
 function remember(q) {
-  const r = [q, ...recent().filter((x) => x !== q)].slice(0, 5);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(r));
+  localStorage.setItem(RECENT_KEY, JSON.stringify([q, ...recent().filter((x) => x !== q)].slice(0, 6)));
+  renderRecent();
 }
-
-function renderSearchIdle() {
-  $("#result-meta").innerHTML = "";
+function renderRecent() {
   const r = recent();
-  const s = state.status;
-  if (s && !s.index) {
-    $("#results").innerHTML = `<div class="empty">
-      <h2>No index yet</h2>
-      <p>Search needs an index. Build one from the shards on disk; it takes a few seconds on a small corpus.</p>
-      <a class="btn" href="#index">Build an index</a></div>`;
-    return;
-  }
-  $("#results").innerHTML = `<div class="empty">
-    <h2>Search the index</h2>
-    <p>Queries are tokenized like the documents: lowercased, stopwords removed, plurals folded, adjacent words paired.
-       Press <kbd class="kbd">Enter</kbd> to run.</p>
-    ${r.length ? `<div class="empty-list" aria-label="Recent searches">${r.map((q) => `<button type="button" class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>` : ""}
-  </div>`;
+  $("#recent").innerHTML = r.length
+    ? `<span class="recent-label">Recent searches</span><div class="recent-list">${r.map((q) => `<button type="button" class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>`
+    : `<span class="recent-label">Press Enter to search. <span class="kbd-hint"></span></span>`;
+  const h = $(".kbd-hint", $("#recent"));
+  if (h) h.textContent = `${isMac ? "⌘" : "Ctrl"} K brings you back here from any page.`;
 }
-
-$("#results").addEventListener("click", (e) => {
+$("#recent").addEventListener("click", (e) => {
   const c = e.target.closest("[data-q]");
   if (!c) return;
   $("#q").value = c.dataset.q;
   runSearch();
 });
 
+function renderSearchHero() {
+  const s = state.status;
+  const el = $("#search-hero");
+  if (state.last) {
+    const d = state.last;
+    const n = d.results.length;
+    hero(el, { tag: "Last search", href: "#benchmarks", label: "Open benchmarks",
+      text: n ? `<b>${n}</b> paper${n === 1 ? "" : "s"} matched “${esc(d.q)}” in <b>${fmtMs(d.latency_ms)}</b>` : `Nothing matched “${esc(d.q)}”. Try fewer or different words.` });
+  } else if (s && s.index) {
+    hero(el, { tag: "Index ready", href: "#index", label: "Open index runs",
+      text: `<b>${fmtInt(s.index.docs)}</b> papers ready to search, indexed ${onLayout(s.index)}` });
+  } else {
+    hero(el, { tag: "No index", href: "#index", label: "Build an index", text: "Build an index first, then search titles and abstracts here." });
+  }
+}
+
+function renderSearchIdle() {
+  const s = state.status;
+  $("#result-meta").textContent = "Run a search to see ranked papers.";
+  $("#results").innerHTML =
+    s && !s.index
+      ? `<div class="empty"><h3>No index yet</h3><p>Search needs an index. Build one from the shards on disk; on a small corpus it takes a few seconds.</p><a class="btn" href="#index">Build an index</a></div>`
+      : `<div class="empty"><h3>Nothing searched yet</h3><p>Results show the paper id, its score relative to the best match, and the exact score the engine returned.</p></div>`;
+}
+
 let searchSeq = 0;
 async function runSearch() {
   const q = $("#q").value.trim();
-  if (!q) return renderSearchIdle();
+  if (!q) return;
   const my = ++searchSeq;
-  $("#result-meta").innerHTML = `<span>Searching…</span>`;
+  $("#result-meta").textContent = `Searching for “${q}”…`;
   $("#results").setAttribute("aria-busy", "true");
   try {
     const d = await api("/api/search", { q });
     if (my !== searchSeq) return;
+    state.last = d;
     remember(q);
     renderResults(d);
+    renderSearchHero();
   } catch (e) {
     if (my !== searchSeq) return;
-    $("#result-meta").innerHTML = "";
     const noIndex = e.status === 409 && /no index/.test(e.message);
-    $("#results").innerHTML = `<div class="empty">
-      <h2>${noIndex ? "No index yet" : "Search did not run"}</h2>
+    $("#result-meta").textContent = "The search did not run.";
+    $("#results").innerHTML = `<div class="empty"><h3>${noIndex ? "No index yet" : "Search did not run"}</h3>
       <p>${esc(noIndex ? "Search needs an index. Build one from the shards on disk first." : e.message)}</p>
       ${noIndex ? '<a class="btn" href="#index">Build an index</a>' : ""}</div>`;
   } finally {
@@ -193,41 +217,36 @@ async function runSearch() {
 
 function renderResults(d) {
   const n = d.results.length;
-  $("#result-meta").innerHTML = `<span><b class="num">${n}</b> result${n === 1 ? "" : "s"}</span>
-    <span><b class="num">${fmtMs(d.latency_ms)}</b> end to end</span>
-    <span>${esc(layoutLabel(d.layout))}</span>`;
+  $("#result-meta").textContent = `“${d.q}” · ${plural(n, "result")} · ${fmtMs(d.latency_ms)} end to end · ${layoutLabel(d.layout)}`;
   if (!n) {
-    $("#results").innerHTML = `<div class="empty">
-      <h2>No documents match “${esc(d.q)}”</h2>
-      <p>Every term is either a stopword, shorter than the minimum length, or absent from the index. Try fewer or different words.</p></div>`;
+    $("#results").innerHTML = `<div class="empty"><h3>No documents match “${esc(d.q)}”</h3>
+      <p>Every term is a stopword, shorter than the minimum length, or absent from the index. Try fewer or different words.</p></div>`;
     return;
   }
   const top = d.results[0].score || 1;
-  const rows = d.results
+  $("#results").innerHTML = `<ol class="rows" aria-label="Results for ${esc(d.q)}">${d.results
     .map((r, i) => {
-      const link = ARXIV.test(r.id)
-        ? `<a class="result-id" href="https://arxiv.org/abs/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${esc(r.id)}${ICON_EXT}</a>`
-        : `<span class="result-id">${esc(r.id)}</span>`;
-      const w = Math.max(2, (r.score / top) * 100);
-      return `<li class="result" style="animation-delay:${i * 18}ms">
-        <span class="result-rank">${String(r.rank).padStart(2, "0")}</span>
-        ${link}
-        <span class="result-bar"><span class="score-bar" aria-hidden="true"><span style="width:${w.toFixed(1)}%;animation-delay:${i * 18}ms"></span></span></span>
-        <span class="result-score" title="Score">${esc(r.score_text)}</span></li>`;
+      const id = ARXIV.test(r.id)
+        ? `<a class="row-name" href="https://arxiv.org/abs/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${esc(r.id)}${ICON_EXT}</a>`
+        : `<span class="row-name">${esc(r.id)}</span>`;
+      const w = Math.max(2, (r.score / top) * 100).toFixed(1);
+      return `<li class="row result" style="animation-delay:${i * 20}ms">
+        <span class="avatar ${i === 0 ? "avatar-blue" : ""}" aria-label="Rank ${r.rank}">${String(r.rank).padStart(2, "0")}</span>
+        ${id}
+        <span class="bar" aria-hidden="true"><span style="width:${w}%;animation-delay:${i * 20}ms"></span></span>
+        <span class="pill score" title="Exact score">${esc(r.score_text)}</span></li>`;
     })
-    .join("");
-  $("#results").innerHTML = `<div class="results-head" aria-hidden="true"><span>#</span><span>Paper</span><span>Relative score</span><span>Score</span></div>
-    <ol class="results" aria-label="Results for ${esc(d.q)}">${rows}</ol>`;
+    .join("")}</ol>`;
 }
 
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+if (isMac) $(".kbd-mod").textContent = "⌘";
 $("#search-form").addEventListener("submit", (e) => {
   e.preventDefault();
   runSearch();
 });
-$("#q").addEventListener("keydown", (e) => {
-  if (e.key === "Escape") e.target.blur();
-});
-if (/Mac|iPhone|iPad/.test(navigator.platform)) $(".kbd-mod").textContent = "⌘";
+$("#q").addEventListener("keydown", (e) => e.key === "Escape" && e.target.blur());
+$("#focus-search").addEventListener("click", () => $("#q").select());
 document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
@@ -239,9 +258,19 @@ document.addEventListener("keydown", (e) => {
 /* ------------------------------------------------------------------ index */
 const MODE_HELP = {
   seq: "One process, one thread. The baseline every speedup is measured against.",
-  omp: "One process on this node; OpenMP threads parse shards and build buckets in parallel.",
+  omp: "One process; OpenMP threads parse shards and build buckets in parallel.",
   mpi: "Shards are split across MPI ranks; document frequencies are exchanged with MPI_Alltoallv.",
 };
+
+function renderIndexHero() {
+  const s = state.status;
+  if (!s) return;
+  const run = s.index && state.runs.find((r) => r.id === s.index.run);
+  hero($("#index-hero"), s.index
+    ? { tag: "Current index", href: "#search", label: "Search this index",
+        text: `<b>${fmtInt(s.index.docs)}</b> papers indexed ${onLayout(s.index)}${run ? ` in <b>${fmtSec(run.engine_seconds ?? run.seconds)}</b>` : ""}` }
+    : { tag: "No index yet", text: "Pick a layout and a corpus size below, then start the first run." });
+}
 
 function renderIndexForm() {
   const s = state.status;
@@ -263,7 +292,7 @@ function renderIndexForm() {
   $("#sizes").innerHTML = s.sizes
     .map((z) => {
       const on = z.name === state.size;
-      const meta = z.shards === 0 ? "No shards on disk" : `${fmtInt(z.shards)} shard${z.shards === 1 ? "" : "s"}${z.shards < z.requested ? ` of ${z.requested}` : ""}`;
+      const meta = z.shards === 0 ? "No shards on disk" : `${plural(z.shards, "shard")}${z.shards < z.requested ? ` of ${z.requested}` : ""}`;
       return `<button type="button" class="size" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-value="${esc(z.name)}" ${z.shards === 0 ? "disabled" : ""}>
         <span class="size-name">${esc(z.name)}</span><span class="size-meta">${meta}</span></button>`;
     })
@@ -304,8 +333,7 @@ function radioGroup(el, onPick) {
     if (!dir) return;
     e.preventDefault();
     const items = $$("[role=radio]:not(:disabled)", el);
-    const i = items.indexOf(document.activeElement);
-    const next = items[(i + dir + items.length) % items.length];
+    const next = items[(items.indexOf(document.activeElement) + dir + items.length) % items.length];
     onPick(next.dataset.value);
     $(`[role=radio][data-value="${CSS.escape(next.dataset.value)}"]`, el).focus();
   });
@@ -317,8 +345,7 @@ $$("[data-stepper]").forEach((el) =>
     const b = e.target.closest("[data-step]");
     if (!b || b.disabled) return;
     const k = el.dataset.stepper;
-    const max = state.status.limits[k];
-    state[k] = Math.min(max, Math.max(1, state[k] + Number(b.dataset.step)));
+    state[k] = Math.min(state.status.limits[k], Math.max(1, state[k] + Number(b.dataset.step)));
     renderIndexForm();
   })
 );
@@ -348,8 +375,7 @@ function follow(job) {
     state.stream = null;
     clearInterval(state.tick);
     showRun(j);
-    loadStatus();
-    loadRuns.stale = true;
+    loadRuns().then(loadStatus);
     if (j && j.status === "ok") toast(`Index ready: ${fmtInt(j.docs)} documents in ${fmtSec(j.engine_seconds ?? j.seconds)}.`);
   };
   if (window.EventSource) {
@@ -385,23 +411,25 @@ function poll(done) {
 function paintElapsed(j) {
   if (!j) return;
   const end = j.status === "running" ? Date.now() / 1000 + state.clockSkew : j.finished;
-  $("#run-elapsed").textContent = fmtSec(Math.max(0, end - j.started));
+  const t = fmtSec(Math.max(0, end - j.started));
+  $("#run-elapsed").textContent = j.status === "running" ? `Elapsed ${t}` : `Finished in ${t}`;
 }
 
 function showRun(j) {
   if (!j) return;
-  const p = $("#run-panel");
-  p.hidden = false;
   const running = j.status === "running";
   const failed = j.status === "failed";
-  $("#run-title").innerHTML = running
-    ? '<span class="dot" data-state="running"></span>Indexing'
+  $("#run-title").textContent = running ? "Indexing" : failed ? "Index run failed" : "Index ready";
+  $("#run-status").innerHTML = running
+    ? '<span class="dot" data-state="running"></span>In process'
     : failed
-    ? '<span class="dot" data-state="offline"></span>Index run failed'
-    : '<span class="dot" data-state="ready"></span>Index ready';
-  $("#run-sub").textContent = `${layoutLabel(j)} · size ${j.size} · ${fmtInt(j.shards)} shard${j.shards === 1 ? "" : "s"} · run ${j.id}`;
-  const pct = failed ? j.progress : running ? j.progress : 100;
-  $("#run-pct").textContent = pct + "%";
+    ? '<span class="dot" data-state="offline"></span>Failed'
+    : '<span class="dot" data-state="ready"></span>Completed';
+  $("#run-sub").textContent = `${layoutLabel(j)} · size ${j.size} · ${plural(j.shards, "shard")} · run ${j.id}`;
+  const pct = running || failed ? j.progress : 100;
+  const big = $("#run-pct");
+  big.textContent = pct + "%";
+  big.classList.remove("is-idle");
   const bar = $("#run-bar");
   bar.setAttribute("aria-valuenow", pct);
   bar.classList.toggle("is-running", running);
@@ -410,9 +438,7 @@ function showRun(j) {
   paintElapsed(j);
   const stats = $("#run-stats");
   if (running) {
-    stats.innerHTML = ["Documents", "Engine time", "Wall time", "Peak memory"]
-      .map((k) => `<div><dt>${k}</dt><dd><span class="skeleton dd"></span></dd></div>`)
-      .join("");
+    stats.innerHTML = ["Documents", "Engine time", "Wall time", "Peak memory"].map((k) => `<div><dt>${k}</dt><dd><span class="skeleton"></span></dd></div>`).join("");
   } else if (failed) {
     stats.innerHTML = `<div style="grid-column:1/-1"><dt>Error</dt><dd class="err-text">${esc(j.error || "engine exited with an error")}</dd></div>`;
   } else {
@@ -421,10 +447,13 @@ function showRun(j) {
       ["Engine time", fmtSec(j.engine_seconds)],
       ["Wall time", fmtSec(j.seconds)],
       ["Peak memory", j.peak_mib == null ? "—" : `${fmtInt(Math.round(j.peak_mib))} MiB`],
-    ]
-      .map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`)
-      .join("");
+    ].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
   }
+}
+
+function showIdleRun() {
+  $("#run-stats").innerHTML = ["Documents", "Engine time", "Wall time", "Peak memory"].map((k) => `<div><dt>${k}</dt><dd>—</dd></div>`).join("");
+  $("#run-sub").textContent = "Start a run below to watch it here.";
 }
 
 /* ------------------------------------------------------------------ benchmarks */
@@ -432,117 +461,135 @@ async function loadRuns() {
   try {
     state.runs = (await api("/api/runs")).runs;
   } catch (e) {
-    $("#runs").innerHTML = `<p class="table-empty">${esc(e.message)}</p>`;
+    $("#runs").innerHTML = `<div class="empty"><h3>Run history unavailable</h3><p>${esc(e.message)}</p></div>`;
     return;
   }
   const done = new Set(state.runs.filter((r) => r.status === "ok").map((r) => r.size));
   const known = state.status ? state.status.sizes.map((z) => z.name) : [];
   const sizes = [...known.filter((z) => done.has(z)), ...[...done].filter((z) => !known.includes(z))];
   const latest = state.runs.find((r) => r.status === "ok");
-  if (loadRuns.stale || !sizes.includes(state.benchSize)) state.benchSize = latest ? latest.size : null;
-  loadRuns.stale = false;
-  $("#bench-size").innerHTML = sizes
-    .map((z) => `<button type="button" role="radio" aria-checked="${z === state.benchSize}" tabindex="${z === state.benchSize ? 0 : -1}" data-value="${esc(z)}">Size ${esc(z)}</button>`)
-    .join("");
-  $("#bench-size").hidden = sizes.length === 0;
+  if (!sizes.includes(state.benchSize) || (latest && latest.id !== loadRuns.seen)) state.benchSize = latest ? latest.size : null;
+  loadRuns.seen = latest && latest.id;
+  $("#bench-size").innerHTML = sizes.map((z) => `<option value="${esc(z)}" ${z === state.benchSize ? "selected" : ""}>Size ${esc(z)}</option>`).join("");
+  $("#bench-size-wrap").hidden = sizes.length === 0;
+  if (!(state.status && state.status.job && state.status.job.status === "running")) {
+    if (state.runs[0]) showRun(state.runs[0]);
+    else showIdleRun();
+  }
+  renderIndexHero();
   renderChart();
   renderTable();
 }
-radioGroup($("#bench-size"), (v) => {
-  state.benchSize = v;
-  $$("#bench-size [role=radio]").forEach((b) => {
-    b.setAttribute("aria-checked", b.dataset.value === v);
-    b.tabIndex = b.dataset.value === v ? 0 : -1;
-  });
+$("#bench-size").addEventListener("change", (e) => {
+  state.benchSize = e.target.value;
   renderChart();
 });
 
 const runTime = (r) => r.engine_seconds ?? r.seconds;
-
 function baselines() {
   const base = {};
   for (const r of state.runs) if (r.status === "ok" && r.mode === "seq" && !(r.size in base)) base[r.size] = runTime(r);
-  return base; // runs are newest first, so this keeps the latest sequential run per size
+  return base; // runs are newest first: the latest sequential run per size
+}
+
+function chartData() {
+  const ok = state.runs.filter((r) => r.status === "ok" && r.size === state.benchSize);
+  const base = baselines()[state.benchSize];
+  const seen = new Map();
+  for (const r of ok) if (!seen.has(r.mode + layoutShort(r))) seen.set(r.mode + layoutShort(r), r);
+  // fastest first, like a ranking; the sequential baseline ends up last
+  return { base, ok, rows: base ? [...seen.values()].map((r) => ({ r, x: base / runTime(r) })).sort((a, b) => b.x - a.x) : [] };
 }
 
 function renderChart() {
   const el = $("#chart");
-  const ok = state.runs.filter((r) => r.status === "ok" && r.size === state.benchSize);
-  const base = baselines()[state.benchSize];
+  const { base, ok, rows } = chartData();
+  const bh = $("#bench-hero");
   if (!ok.length) {
-    el.innerHTML = `<div class="empty"><h2>No runs yet</h2><p>Finished index runs show up here. Run the same size sequentially, on one node and on the cluster to compare them.</p><a class="btn" href="#index">Start a run</a></div>`;
+    el.innerHTML = `<div class="empty"><h3>No runs yet</h3><p>Finished index runs show up here. Run one size sequentially, on one node and on the cluster to compare them.</p><a class="btn" href="#index">Start a run</a></div>`;
+    hero(bh, { tag: "Findings", href: "#index", label: "Open index runs", text: "Run the same size in every mode to see how far it scales." });
     return;
   }
   if (!base) {
-    el.innerHTML = `<div class="notice">${ICON_INFO}<span>No sequential run of size ${esc(state.benchSize)} yet. Run one to get a baseline for speedup.</span></div>`;
+    el.innerHTML = `<div class="empty"><h3>No baseline for size ${esc(state.benchSize)}</h3><p>Speedup is measured against a sequential run of the same size. Start one to fill this chart.</p><a class="btn" href="#index">Start a sequential run</a></div>`;
+    hero(bh, { tag: "Findings", href: "#index", label: "Open index runs", text: `Size ${esc(state.benchSize)} has no sequential baseline yet.` });
     return;
   }
-  // latest run per layout, in a fixed order: sequential, single node by threads, cluster by ranks then threads
-  const seen = new Map();
-  for (const r of ok) if (!seen.has(layoutShort(r) + r.mode)) seen.set(layoutShort(r) + r.mode, r);
-  const order = { seq: 0, omp: 1, mpi: 2 };
-  const rows = [...seen.values()].sort((a, b) => order[a.mode] - order[b.mode] || a.ranks - b.ranks || a.threads - b.threads);
-  const W = Math.max(280, Math.round(el.clientWidth || 720));
-  const narrow = W < 520;
-  const short = (r) => (r.mode === "seq" ? "Sequential" : r.mode === "omp" ? `OpenMP × ${r.threads}` : `MPI ${r.ranks} × ${r.threads}`);
-  const data = rows.map((r) => ({ r, label: narrow ? short(r) : layoutLabel(r), x: base / runTime(r) }));
+  const best = rows[0];
+  hero(bh, { tag: "Findings", href: "#index", label: "Open index runs",
+    text: best.r.mode === "seq"
+      ? `Only the sequential baseline has run for size ${esc(state.benchSize)} so far`
+      : `${esc(layoutLabel(best.r))} indexes size ${esc(state.benchSize)} <b>${best.x.toFixed(2)}×</b> faster than one thread` });
 
-  const rowH = 32, gap = 8, left = narrow ? 92 : 176, right = 56, top = 8, axisH = 28;
-  const H = top + data.length * (rowH + gap) - gap + axisH;
-  const maxX = Math.max(2, Math.ceil(Math.max(...data.map((d) => d.x)) * 2) / 2);
-  const sx = (v) => left + (v / maxX) * (W - left - right);
-  const ticks = [];
-  const step = maxX <= 3 ? 0.5 : maxX <= 6 ? 1 : 2;
-  for (let v = 0; v <= maxX + 1e-9; v += step) ticks.push(v);
-
-  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Speedup versus sequential for size ${esc(state.benchSize)}">`;
-  for (const v of ticks) {
-    const x = sx(v).toFixed(1);
-    svg += `<line class="grid" x1="${x}" x2="${x}" y1="${top - 4}" y2="${H - axisH + 4}"/>`;
-    svg += `<text class="axis" x="${x}" y="${H - 8}" text-anchor="middle">${v % 1 ? v.toFixed(1) : v}×</text>`;
-  }
-  data.forEach((d, i) => {
-    const y = top + i * (rowH + gap);
-    const w = Math.max(2, sx(d.x) - left);
-    svg += `<text class="lbl" x="${left - 16}" y="${y + rowH / 2 + 4}" text-anchor="end">${esc(d.label)}</text>`;
-    svg += `<rect class="${d.r.mode === "seq" ? "bar bar-seq" : "bar"}" x="${left}" y="${y + 8}" width="${w.toFixed(1)}" height="${rowH - 16}" rx="2"><title>${esc(d.label)}: ${d.x.toFixed(2)}× (${fmtSec(runTime(d.r))})</title></rect>`;
-    svg += `<text class="val" x="${(left + w + 8).toFixed(1)}" y="${y + rowH / 2 + 4}">${d.x.toFixed(2)}×</text>`;
+  const W = Math.max(280, Math.round(el.clientWidth || 600));
+  const narrow = W < 480;
+  const n = rows.length, gap = narrow ? 6 : 10, capH = narrow ? 24 : 44, H = narrow ? 260 : 320, top = 8;
+  const bw = (W - gap * (n - 1)) / n;
+  const plotH = H - capH - top;
+  const maxX = Math.max(...rows.map((d) => d.x)) * 1.04;
+  const yOf = (x) => top + plotH - (x / maxX) * plotH;
+  const rad = Math.min(narrow ? 14 : 20, bw / 3);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Speedup versus sequential for size ${esc(state.benchSize)}">
+    <defs><pattern id="hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hatch-line" x1="0" y1="0" x2="0" y2="9"/></pattern></defs>`;
+  rows.forEach((d, i) => {
+    const x = i * (bw + gap), y = yOf(d.x), h = top + plotH - y, on = i === 0 && d.r.mode !== "seq";
+    svg += `<g><title>${esc(layoutLabel(d.r))}: ${d.x.toFixed(2)}× (${fmtSec(runTime(d.r))})</title>
+      <rect class="${on ? "b-on" : "b-in"}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="${rad}"/>`;
+    if (on && h > 90 && bw > 40) {
+      const inset = narrow ? 5 : 8;
+      svg += `<rect class="hatch-box" x="${(x + inset).toFixed(1)}" y="${(y + (narrow ? 34 : 52)).toFixed(1)}" width="${(bw - 2 * inset).toFixed(1)}" height="${(h - (narrow ? 34 : 52) - inset).toFixed(1)}" rx="${Math.max(4, rad - inset)}"/>`;
+    }
+    if (d.r.mode !== "seq") svg += `<text class="${on ? "v-on" : "v-in"}" x="${(x + (narrow ? 8 : 18)).toFixed(1)}" y="${(y + (narrow ? 24 : 34)).toFixed(1)}" ${narrow ? 'style="font-size:15px"' : ""}>${d.x.toFixed(2)}×</text>`;
+    const cx = (x + bw / 2).toFixed(1);
+    if (narrow) svg += `<text class="cap-2" x="${cx}" y="${H - 6}" text-anchor="middle">${layoutShort(d.r)}</text>`;
+    else svg += `<text class="cap" x="${cx}" y="${H - 24}" text-anchor="middle">${MODE[d.r.mode]}</text><text class="cap-2" x="${cx}" y="${H - 6}" text-anchor="middle">${layoutShort(d.r)}</text>`;
+    svg += `</g>`;
   });
-  const bx = sx(1).toFixed(1);
-  svg += `<line class="base" x1="${bx}" x2="${bx}" y1="${top - 4}" y2="${H - axisH + 4}"/></svg>`;
+  // dashed baseline at 1x with a label, like a callout
+  const by = yOf(1);
+  const si = rows.findIndex((d) => d.r.mode === "seq");
+  const label = bw < 96 ? "1×" : "1× baseline";
+  const tw = Math.min(bw - 8, label.length * 7.4 + 24);
+  const tx = si * (bw + gap) + bw / 2;
+  svg += `<line class="base" x1="0" x2="${W}" y1="${by.toFixed(1)}" y2="${by.toFixed(1)}"/>
+    <rect class="tip" x="${(tx - tw / 2).toFixed(1)}" y="${(by - 15).toFixed(1)}" width="${tw.toFixed(1)}" height="30" rx="8"/>
+    <text class="tip-t" x="${tx.toFixed(1)}" y="${(by + 5).toFixed(1)}" text-anchor="middle">${label}</text></svg>`;
   el.innerHTML = svg;
 }
 
 function renderTable() {
   const el = $("#runs");
   if (!state.runs.length) {
-    el.innerHTML = `<p class="table-empty">No index runs recorded yet.</p>`;
+    $("#runs-range").textContent = "";
+    el.innerHTML = `<div class="empty"><h3>No index runs recorded yet</h3><p>Every run you start from the Index page is listed here with its timings.</p></div>`;
     return;
   }
+  const first = state.runs[state.runs.length - 1].started, last = state.runs[0].started;
+  const day = (t) => new Date(t * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  $("#runs-range").textContent = `${plural(state.runs.length, "run")} · ${day(first) === day(last) ? day(last) : `${day(first)} – ${day(last)}`}`;
   const base = baselines();
-  const MODE = { seq: "Sequential", omp: "Single node", mpi: "Cluster" };
-  el.innerHTML = `<table>
-    <thead><tr><th scope="col" class="hide-sm">Run</th><th scope="col">Mode</th><th scope="col">Size</th><th scope="col" class="r hide-sm">Documents</th>
-      <th scope="col" class="r">Engine</th><th scope="col" class="r hide-sm">Wall</th><th scope="col" class="r">Speedup</th><th scope="col" class="hide-sm">Status</th><th scope="col" class="r hide-sm">When</th></tr></thead>
-    <tbody>${state.runs
-      .map((r) => {
-        const sp = r.status === "ok" && base[r.size] ? (base[r.size] / runTime(r)).toFixed(2) + "×" : "—";
-        const st = r.status === "ok" ? '<span class="dot" data-state="ready"></span>Done' : '<span class="dot" data-state="offline"></span>Failed';
-        return `<tr><td class="hide-sm"><span class="mono">${esc(r.id)}</span></td>
-          <td>${MODE[r.mode]}<span class="layout-tag">${layoutShort(r)}</span></td>
-          <td>${esc(r.size)}</td><td class="r hide-sm">${fmtInt(r.docs)}</td>
-          <td class="r">${fmtSec(r.engine_seconds)}</td><td class="r hide-sm">${fmtSec(r.seconds)}</td><td class="r">${sp}</td>
-          <td class="hide-sm"><span class="status" ${r.error ? `title="${esc(r.error)}"` : ""}>${st}</span></td>
-          <td class="r muted hide-sm">${ago(r.finished)}</td></tr>`;
-      })
-      .join("")}</tbody></table>`;
+  el.innerHTML = `<ul class="rows" aria-label="Index runs, newest first">${state.runs
+    .map((r, i) => {
+      const sp = r.status === "ok" && base[r.size] ? (base[r.size] / runTime(r)).toFixed(2) + "×" : "—";
+      const av = r.mode === "mpi" ? "avatar-blue" : r.mode === "omp" ? "avatar-ink" : "";
+      const st = r.status === "ok" ? '<span class="dot" data-state="ready"></span>Completed' : '<span class="dot" data-state="offline"></span>Failed';
+      return `<li class="row run-row" style="animation-delay:${Math.min(i, 12) * 15}ms">
+        <span class="avatar ${av}" aria-hidden="true">${r.mode === "seq" ? "1" : layoutShort(r).replace(/ /g, "")}</span>
+        <span class="row-name">${MODE[r.mode]} ${layoutShort(r)}<span class="row-sub">${fmtInt(r.docs)} docs · run <span class="mono">${esc(r.id)}</span></span></span>
+        <span class="row-muted col-when">${when(r.started)}</span>
+        <span class="pill status-pill col-status" ${r.error ? `title="${esc(r.error)}"` : ""}>${st}</span>
+        <span class="pill col-size">Size ${esc(r.size)}</span>
+        <span class="row-amount">${fmtSec(r.engine_seconds)}</span>
+        <span class="row-amount" style="color:var(--ink-3)">${sp}</span></li>`;
+    })
+    .join("")}</ul>`;
 }
 
 /* ------------------------------------------------------------------ cluster */
 function fmtMem(b) {
-  if (!b) return "—";
+  if (!b) return ["—", ""];
   const g = b / 2 ** 30;
-  return g >= 10 ? Math.round(g) + " GiB" : g.toFixed(1) + " GiB";
+  return [g >= 10 ? String(Math.round(g)) : g.toFixed(1), "GiB"];
 }
 
 async function loadCluster() {
@@ -551,43 +598,51 @@ async function loadCluster() {
   const btn = $("#cluster-refresh");
   btn.disabled = true;
   el.setAttribute("aria-busy", "true");
-  el.innerHTML = ["master", "w1", "w2"]
-    .map(
-      (n) => `<div class="panel node is-skeleton"><div class="node-head"><div><div class="node-name">${n}</div><div class="node-role">Probing</div></div></div>
-      <dl>${["Status", "vCPUs", "Memory", "Shards", "Index parts"].map((k) => `<div><dt>${k}</dt><dd><span class="skeleton"></span></dd></div>`).join("")}</dl></div>`
-    )
-    .join("");
+  el.innerHTML = ["master", "w1", "w2"].map((n) => `<article class="card node is-skeleton"><div class="node-head"><span class="avatar">${n === "master" ? "M" : n.toUpperCase()}</span><div><div class="node-name">${n}</div><div class="node-role">Probing</div></div></div>
+      <dl class="kv">${["Status", "vCPUs", "Memory", "Shards"].map((k) => `<div><dt>${k}</dt><dd><span class="skeleton" style="width:48px"></span></dd></div>`).join("")}</dl></article>`).join("");
   try {
     const c = await api("/api/cluster");
-    $("#cluster-lede").textContent =
-      c.mode === "local"
-        ? "No hostfile found, so every node name maps to this machine and MPI ranks run locally."
-        : "Nodes from the MPI hostfile, each probed with one process through mpirun.";
+    const on = c.nodes.filter((n) => n.status === "online");
+    const vcpus = on.reduce((a, n) => a + (n.vcpus || 0), 0);
+    const local = c.mode === "local";
+    $("#cluster-lede").textContent = local
+      ? "No hostfile found, so every node name maps to this machine and MPI ranks run locally."
+      : "Nodes from the MPI hostfile, each probed with one process through mpirun.";
+    hero($("#cluster-hero"), { tag: local ? "Local cluster" : "Cluster", href: "#index", label: "Start a cluster run",
+      text: local
+        ? `<b>${c.nodes.length}</b> node names share this machine’s <b>${vcpus / Math.max(1, on.length)}</b> vCPUs`
+        : `<b>${on.length}</b> of ${c.nodes.length} nodes online with <b>${vcpus}</b> vCPUs in total` });
+    const counts = c.nodes.map((n) => n.shards || 0);
+    const total = counts.reduce((a, b) => a + b, 0) || 1;
+    const same = counts.every((x) => x === counts[0]);
+    $("#cluster-summary").innerHTML = `<div class="card-head"><div><h2 class="card-title">Shards on disk</h2><p class="card-sub">Per node, from /data/shards</p></div></div>
+      <div class="big-row"><span class="big">${fmtInt(Math.max(...counts))}</span><span class="chip-soft">${same ? "Same on every node" : "Nodes differ"}</span></div>
+      <div><div class="segbar" aria-hidden="true">${counts.map((x) => `<span style="flex:${Math.max(x, total * 0.04)}"></span>`).join("")}</div>
+      <div class="seglabels" style="margin-top:12px">${c.nodes.map((n, i) => `<span style="flex:${Math.max(counts[i], total * 0.04)}">${esc(n.name)}</span>`).join("")}</div></div>
+      <p class="card-sub">Index parts: ${c.nodes.map((n) => `${esc(n.name)} ${n.index_parts ?? "—"}`).join(" · ")}</p>`;
     el.innerHTML = c.nodes
       .map((n, i) => {
-        const on = n.status === "online";
-        const rows = [
-          ["Status", `<span class="status"><span class="dot" data-state="${on ? "ready" : "offline"}"></span>${on ? "Online" : "Unreachable"}</span>`],
-          ["Host", `<span class="mono">${esc(n.host || n.address)}</span>`],
-          ["vCPUs", on ? fmtInt(n.vcpus) : "—"],
-          ["Memory", on ? fmtMem(n.mem_bytes) : "—"],
-          ["Shards present", on ? fmtInt(n.shards) : "—"],
-          ["Index parts", on ? fmtInt(n.index_parts) : "—"],
-        ];
-        return `<article class="panel node" aria-label="Node ${esc(n.name)}">
-          <div class="node-head"><div><div class="node-name">${esc(n.name)}</div>
-            <div class="node-role">${i === 0 ? "Master · rank 0" : "Worker"}${n.simulated ? " · local" : ""}</div></div></div>
-          <dl>${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl></article>`;
+        const up = n.status === "online";
+        const [mem, unit] = fmtMem(n.mem_bytes);
+        return `<article class="card node" aria-label="Node ${esc(n.name)}">
+          <div class="node-head"><span class="avatar ${i === 0 ? "avatar-blue" : "avatar-ink"}" aria-hidden="true">${i === 0 ? "M" : esc(n.name.toUpperCase().slice(0, 2))}</span>
+            <div><div class="node-name">${esc(n.name)}</div><div class="node-role">${i === 0 ? "Master · rank 0" : "Worker"}${n.simulated ? " · local" : ""}</div></div>
+            <span class="pill pill-sm"><span class="dot" data-state="${up ? "ready" : "offline"}"></span>${up ? "Online" : "Unreachable"}</span></div>
+          <dl class="node-big"><div><dt>vCPUs</dt><dd>${up ? fmtInt(n.vcpus) : "—"}</dd></div><div><dt>Memory</dt><dd>${up ? mem : "—"}<small>${up ? unit : ""}</small></dd></div></dl>
+          <dl class="kv"><div><dt>Host</dt><dd class="mono">${esc(n.host || n.address)}</dd></div>
+            <div><dt>Shards present</dt><dd>${up ? fmtInt(n.shards) : "—"}</dd></div>
+            <div><dt>Index parts</dt><dd>${up ? fmtInt(n.index_parts) : "—"}</dd></div></dl></article>`;
       })
       .join("");
   } catch (e) {
-    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><h2>Cluster probe failed</h2><p>${esc(e.message)}</p></div>`;
+    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>Cluster probe failed</h3><p>${esc(e.message)}</p></div>`;
   } finally {
     btn.disabled = false;
     el.removeAttribute("aria-busy");
   }
 }
 $("#cluster-refresh").addEventListener("click", loadCluster);
+
 let resizeH;
 window.addEventListener("resize", () => {
   clearTimeout(resizeH);
@@ -596,10 +651,10 @@ window.addEventListener("resize", () => {
 
 /* ------------------------------------------------------------------ start */
 paintTheme();
+renderRecent();
+showIdleRun();
 route();
-loadStatus().then(() => {
-  if (location.hash === "#search" || !location.hash) if (!$("#q").value) renderSearchIdle();
-});
+loadStatus().then(loadRuns);
 setInterval(() => {
   if (!state.stream) loadStatus();
 }, 15000);
