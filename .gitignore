@@ -36,3 +36,9 @@ build/
 __pycache__/
 *.pyc
 .DS_Store
+
+# grading hand-in and Jenkins secrets (never committed)
+submission/
+*.token
+*_pass
+.webhook_secret
