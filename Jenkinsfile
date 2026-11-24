@@ -1,7 +1,7 @@
 // CI for papermill-mpi: a push to main (git push or a web upload) triggers this on the Jenkins EC2 host via the
 // GitHub webhook. Builds the engine natively (no Docker) and runs tests/run_tests.sh, which expects the repo at /work.
 // Uploaded .c files are compiled in their own stage; a broken upload never fails the main build. Other file types
-// are only listed.
+// are only listed. Deploy publishes a status page (ci/deploy_page.py) to nginx on the same host.
 pipeline {
   agent any
   triggers { githubPush() }
@@ -13,7 +13,10 @@ pipeline {
         script {
           def v = checkout scm
           env.PREV_COMMIT = v.GIT_PREVIOUS_COMMIT ?: ''
-          echo "Triggered by: ${currentBuild.getBuildCauses()*.shortDescription.join('; ')}"
+          def causes = currentBuild.getBuildCauses()*.shortDescription
+          echo "Triggered by: ${causes.join('; ')}"
+          def push = causes.find { it.startsWith('Started by GitHub push by ') }
+          env.PUSHED_BY = push ? push - 'Started by GitHub push by ' : causes.join('; ')
         }
         sh '''#!/bin/bash
           TOKEN=$(curl -s -m 2 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
@@ -87,6 +90,15 @@ pipeline {
     stage('Archive') {
       steps {
         archiveArtifacts artifacts: 'build/engine, build/test.log, build/changed.txt, build/uploads/**', allowEmptyArchive: true, fingerprint: true
+      }
+    }
+
+    stage('Deploy') {
+      // only reached when Build and Test passed (a failed stage skips the rest); publishes the status page via nginx
+      when { expression { currentBuild.currentResult == 'SUCCESS' } }
+      steps {
+        sh 'python3 ci/deploy_page.py /var/www/html/index.html "$JENKINS_HOME/deploy-history.jsonl" build/changed.txt build/test.log'
+        echo 'Live page: http://52.204.60.234/'
       }
     }
   }
